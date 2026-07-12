@@ -19,6 +19,7 @@
 | TZ | Local Time Zone | "Europe/Berlin" |
 | SUB | Show sub column  | true/false |
 | UNSORTED | unsorted data | true/false |
+| CLEANUP | replace non-printable characters in payload | true/false |
 | HEAT | highlight the newest updated topics | true/false |
 | HIGHLIGHT | topic to be highlighted (regex) | "power" |
 | OUTDATE | Number of seconds to drop old data sets | 86400 |

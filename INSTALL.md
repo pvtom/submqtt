@@ -60,6 +60,7 @@ usage: submqtt
                 --outdate <number of seconds> clear buffered data
                 --sub add the matching subscribed topic to the output
                 --unsorted output of the buffered table
+                --cleanup replace non-printable characters in payload
 
         Color Sets:
                 --white --blue --cyan --red --green --magenta --yellow --blue-screen
