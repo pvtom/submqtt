@@ -45,8 +45,7 @@ int hstrcpy(char **str, int *reserved, const char *fmt, ...) {
     return(i);
 }
 
-size_t hreplace_regex(char **str, int *reserved, const char *search, const char *replace) {
-    regex_t regex;
+size_t hreplace_regex(char **str, int *reserved, regex_t *preg, const char *replace) {
     regmatch_t pmatch[1];
     regoff_t off, len;
     int i;
@@ -56,13 +55,10 @@ size_t hreplace_regex(char **str, int *reserved, const char *search, const char 
 
     if ((*str == NULL) || (replace == NULL)) return(0);
     size_t size = strlen(*str);
-    if ((search == NULL) || !strlen(search)) return(size);
     size_t rlen = strlen(replace);
 
-    if (regcomp(&regex, search, REG_NEWLINE)) return(0);
-
     for (i = 0; ; i++) {
-        if (regexec(&regex, s, ARRAY_SIZE(pmatch), pmatch, 0)) break;
+        if (regexec(preg, s, ARRAY_SIZE(pmatch), pmatch, 0) == REG_NOMATCH) break;
         off = pmatch[0].rm_so + (s - *str);
         len = pmatch[0].rm_eo - pmatch[0].rm_so;
         if (rlen != len) {
@@ -72,7 +68,6 @@ size_t hreplace_regex(char **str, int *reserved, const char *search, const char 
                 if (t == NULL) {
                     if (*str) free(*str);
                     *str = NULL;
-                    regfree(&regex);
                     return(0);
                 }
                 *str = seg = s = t;
@@ -84,6 +79,5 @@ size_t hreplace_regex(char **str, int *reserved, const char *search, const char 
         memcpy(p, replace, rlen);
         s += pmatch[0].rm_eo;
     }
-    regfree(&regex);
     return(size);
 }

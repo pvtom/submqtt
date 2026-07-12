@@ -2,6 +2,6 @@
 #define _HFUNC_H
 
 int hstrcpy(char **str, int *reserved, const char *fmt, ...);
-size_t hreplace_regex(char **str, int *reserved, const char *search, const char *replace);
+size_t hreplace_regex(char **str, int *reserved, regex_t *preg, const char *replace);
 
 #endif

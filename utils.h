@@ -13,6 +13,7 @@
 #include <regex.h>
 #include <sys/select.h>
 #include <ncurses.h>
+#include <ctype.h>
 
 #define TOPIC_SIZE          128
 #define PAYLOAD_SIZE        128
@@ -116,10 +117,12 @@ typedef struct _cset_t cset_t;
 
 struct _mqtt_data {
         char *sub;
+        int sublen;
         char *topic;
         int topiclen;
         char *payload;
         int payloadlen;
+        bool payload_dirty;
         int payloadpos;
         char timestamp[24];
         time_t t;
@@ -137,6 +140,8 @@ struct _scene_set {
         int search_visible;
         int search_occurence;
         char search[80];
+        bool search_active;
+        regex_t *search_re;
         bool help_text;
         bool info;
         int nr;
@@ -153,11 +158,12 @@ typedef struct _scene_set scene_set;
 time_t now(char *ts);
 WINDOW *init_window();
 int init_colors(WINDOW *win, int c);
-int regex_match(char *string, char *pattern);
+int regex_match(regex_t *preg, char *string);
+bool payload_cleanup(char *payload, int len);
 int read_escape_sequence(unsigned char *buf, int maxlen);
-mqtt_data *mqtt_data_create(char *sub, char *topic, char *payload, int payloadlen, char *timestamp, time_t t, mqtt_data *next);
-mqtt_data *mqtt_data_merge(mqtt_data *d, char *sub, char *topic, char *payload, int payloadlen, char *timestamp, time_t t, int unsorted);
-mqtt_data *mqtt_data_store(mqtt_data *d, char *sub, char *topic, char *payload, int payloadlen, int unsorted);
+mqtt_data *mqtt_data_create(char *sub, char *topic, char *payload, int payloadlen, char *timestamp, time_t t, mqtt_data *next, bool cleanup);
+mqtt_data *mqtt_data_merge(mqtt_data *d, char *sub, char *topic, char *payload, int payloadlen, char *timestamp, time_t t, int unsorted, bool cleanup);
+mqtt_data *mqtt_data_store(mqtt_data *d, char *sub, char *topic, char *payload, int payloadlen, bool unsorted, bool cleanup);
 void mqtt_data_free(mqtt_data *d);
 mqtt_data *mqtt_data_position(mqtt_data *d, int position);
 int mqtt_data_search(mqtt_data *d, scene_set *scene);

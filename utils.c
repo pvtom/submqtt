@@ -32,6 +32,7 @@ WINDOW *init_window() {
     use_default_colors();
 
     if (can_change_color()) {
+        init_color(COLOR_WHITE, 1000, 1000, 1000);
         init_color(COLOR_BLACK, 0, 0, 0);
         init_color(COLOR_YELLOW, 700, 700, 0);
     }
@@ -72,31 +73,39 @@ time_t now(char *ts) {
     return(tv.tv_sec); 
 }
 
-int regex_match(char *string, char *pattern) {
-    regex_t preg;
+int regex_match(regex_t *preg, char *string) {
     size_t nmatch = 1;
     regmatch_t pmatch[nmatch];
-    if (regcomp(&preg, pattern, REG_EXTENDED|REG_NEWLINE)) {
-        return(0);
-    }
-    if (regexec(&preg, string, nmatch, pmatch, 0) == REG_NOMATCH) {
-        regfree(&preg);
+    if (regexec(preg, string, nmatch, pmatch, 0) == REG_NOMATCH) {
         return(0);
     } else {
-        regfree(&preg);
         return(1);
     }
 }
 
-mqtt_data *mqtt_data_create(char *sub, char *topic, char *payload, int payloadlen, char *timestamp, time_t t, mqtt_data *next) {
+bool payload_cleanup(char *payload, int len) {
+    bool r = false;
+    int c;
+    for (c = 0; c < len; c++) {
+        if (!isprint(payload[c])) {
+            payload[c] = '?';
+            r = true;
+        }
+    }
+    return(r);
+}
+
+mqtt_data *mqtt_data_create(char *sub, char *topic, char *payload, int payloadlen, char *timestamp, time_t t, mqtt_data *next, bool cleanup) {
     mqtt_data *p;
 
     if ((p = malloc(sizeof(mqtt_data))) == NULL) return(NULL);
     p->sub = strdup(sub);
+    p->sublen = strlen(p->sub);
     p->topic = strdup(topic);
     p->topiclen = strlen(p->topic);
     p->payload = strndup(payload, payloadlen);
     p->payloadlen = payloadlen;
+    p->payload_dirty = cleanup || payload_cleanup(p->payload, p->payloadlen);
     p->payloadpos = 0;
     p->changed = true;
     p->outdated = false;
@@ -106,14 +115,15 @@ mqtt_data *mqtt_data_create(char *sub, char *topic, char *payload, int payloadle
     return(p);
 }
 
-mqtt_data *mqtt_data_merge(mqtt_data *d, char *sub, char *topic, char *payload, int payloadlen, char *timestamp, time_t t, int unsorted) {
+mqtt_data *mqtt_data_merge(mqtt_data *d, char *sub, char *topic, char *payload, int payloadlen, char *timestamp, time_t t, int unsorted, bool cleanup) {
     mqtt_data *p = d;
     mqtt_data *n = NULL;
     bool newlen;
 
     while (p != NULL) {
         if (!strcmp(p->topic, topic)) {
-            newlen = (strlen(p->payload) != payloadlen);
+            newlen = (p->payloadlen != payloadlen);
+            if (p->payload_dirty) payload_cleanup(payload, payloadlen);
             if (newlen || strncmp(p->payload, payload, payloadlen)) {
                 if (newlen) {
                     p->payload = realloc(p->payload, payloadlen + 1);
@@ -131,27 +141,28 @@ mqtt_data *mqtt_data_merge(mqtt_data *d, char *sub, char *topic, char *payload, 
         }
         if (!unsorted) {
             if (!n && (strcmp(p->topic, topic) > 0)) {
-               n = mqtt_data_create(sub, topic, payload, payloadlen, timestamp, t, p);
+               n = mqtt_data_create(sub, topic, payload, payloadlen, timestamp, t, p, cleanup);
                return(n);
             }
             if (n && (strcmp(p->topic, topic) > 0)) {
-               n->next = mqtt_data_create(sub, topic, payload, payloadlen, timestamp, t, p);
+               n->next = mqtt_data_create(sub, topic, payload, payloadlen, timestamp, t, p, cleanup);
                return(d);
             }
         }
         n = p;
         p = p->next;
     }
-    n->next = mqtt_data_create(sub, topic, payload, payloadlen, timestamp, t, NULL);
+    n->next = mqtt_data_create(sub, topic, payload, payloadlen, timestamp, t, NULL, cleanup);
     return(d);
 }
 
-mqtt_data *mqtt_data_store(mqtt_data *d, char *sub, char *topic, char *payload, int payloadlen, int unsorted) {
+mqtt_data *mqtt_data_store(mqtt_data *d, char *sub, char *topic, char *payload, int payloadlen, bool unsorted, bool cleanup) {
     mqtt_data *n = d;
     char timestamp[24];
     time_t t = now(timestamp);
-    if (!d) n = mqtt_data_create(sub, topic, payload, payloadlen, timestamp, t, NULL);
-    else n = mqtt_data_merge(d, sub, topic, payload, payloadlen, timestamp, t, unsorted);
+    payload_cleanup(payload, payloadlen);
+    if (!d) n = mqtt_data_create(sub, topic, payload, payloadlen, timestamp, t, NULL, cleanup);
+    else n = mqtt_data_merge(d, sub, topic, payload, payloadlen, timestamp, t, unsorted, cleanup);
     return(n);
 }
 
@@ -272,6 +283,7 @@ int mqtt_data_set_outdated(mqtt_data *d, int duration) {
 int mqtt_data_search(mqtt_data *d, scene_set *scene) {
     mqtt_data *p;
     int o, i, c, pos;
+    int s = strlen(scene->search);
 
     for (i = 0; i < 2; i++) {
         p = d;
@@ -279,7 +291,7 @@ int mqtt_data_search(mqtt_data *d, scene_set *scene) {
         c = 0;
         pos = 0;
         while (p != NULL) {
-            if (strlen(scene->search) && regex_match(p->topic, scene->search) && (p->outdated == false)) {
+            if (s && regex_match(scene->search_re, p->topic)  && (p->outdated == false)) {
                 o--;
                 if (!o) {
                     pos = c;
@@ -335,7 +347,7 @@ void mqtt_data_print_table(WINDOW *win, mqtt_data *root, mqtt_data *d, scene_set
     char *buffer = malloc(sizeof(char) * cols + 32);
     char pinfo[33];
     int hlight = A_BOLD;
-    int len;
+    int bufferlen;
 
     time_t rawtime;
     time(&rawtime);
@@ -344,22 +356,21 @@ void mqtt_data_print_table(WINDOW *win, mqtt_data *root, mqtt_data *d, scene_set
     if (underline) hlight = A_BOLD | A_UNDERLINE;
 
     // Header
-    len = cols;
-
     snprintf(pinfo, 32, "%d-%d(%d) ", scene->from, scene->to, scene->nr);
     if (scene->search_mode) lines--;
     if (scene->sub) {
-        snprintf(buffer, len, "%-*s %-*s %-*s %-*s", scene->show_ts?timestamp_width + 1:0, HEADER_TIMESTAMP, match_width, HEADER_SUB, topic_width - scene->show_topic_column, HEADER_TOPIC, payload_width, HEADER_PAYLOAD);
+        snprintf(buffer, cols, "%-*s %-*s %-*s %-*s", scene->show_ts?timestamp_width + 1:0, HEADER_TIMESTAMP, match_width, HEADER_SUB, topic_width - scene->show_topic_column, HEADER_TOPIC, payload_width, HEADER_PAYLOAD);
     } else {
-        snprintf(buffer, len, "%-*s %-*s %-*s", scene->show_ts?timestamp_width + 1:0, HEADER_TIMESTAMP, topic_width - scene->show_topic_column, HEADER_TOPIC, payload_width, HEADER_PAYLOAD);
+        snprintf(buffer, cols, "%-*s %-*s %-*s", scene->show_ts?timestamp_width + 1:0, HEADER_TIMESTAMP, topic_width - scene->show_topic_column, HEADER_TOPIC, payload_width, HEADER_PAYLOAD);
     }
+    bufferlen = strlen(buffer);
 
     wattron(win, COLOR_PAIR(1) | A_BOLD);
 
-    if (strlen(buffer) + strlen(pinfo) < cols) {
-        mvwprintw(win, 0, 0, " %s%-*s%s", buffer, (int)(cols - 1 - strlen(buffer) - strlen(pinfo)), "", pinfo);
+    if (bufferlen + strlen(pinfo) < cols) {
+        mvwprintw(win, 0, 0, " %s%-*s%s", buffer, (int)(cols - 1 - bufferlen - strlen(pinfo)), "", pinfo);
     } else {
-        mvwprintw(win, 0, 0, " %s%-*s", buffer, (int)(cols - 1 - strlen(buffer)), "");
+        mvwprintw(win, 0, 0, " %s%-*s", buffer, (int)(cols - 1 - bufferlen), "");
     }
     wclrtoeol(win);
 
@@ -367,23 +378,20 @@ void mqtt_data_print_table(WINDOW *win, mqtt_data *root, mqtt_data *d, scene_set
 
     if (scene->show_payload_column || scene->show_payload_pos_reset) mqtt_data_payload_scroll(root, scene->show_payload_column, payload_size, scene->show_payload_pos_reset);
 
-    //logdebug("submqtt.log", __FILE__, __LINE__, "header >%s< len >%d pinfo >%s< color %d\n", buffer, len, pinfo, c);
-
     // Content
     int i = 0;
     while ((p != NULL) && (i < lines - 1)) {
         if (p->outdated == false) {
             i++;
             if (timestamp_width < strlen(p->timestamp)) timestamp_width = strlen(p->timestamp);
-            if (topic_width < strlen(p->topic)) topic_width = strlen(p->topic);
-            if (match_width < strlen(p->sub)) match_width = strlen(p->sub);
-            if ((len > timestamp_width + topic_width + match_width + strlen(p->payload)) && (payload_width < p->payloadlen)) payload_width = p->payloadlen;
+            if (topic_width < p->topiclen) topic_width = p->topiclen;
+            if (match_width < p->sublen) match_width = p->sublen;
+            if ((cols > timestamp_width + topic_width + match_width + p->payloadlen) && (payload_width < p->payloadlen)) payload_width = p->payloadlen;
             if (scene->show_topic_column > topic_width) scene->show_topic_column = topic_width;
-            len = cols;
             if (scene->sub) {
-                if (snprintf(buffer, len, "[%s] %-*s %-*s %s", p->timestamp + (scene->show_ts?0:11), match_width, p->sub, topic_width - scene->show_topic_column, p->topic + max_move_p(p->topic, p->topiclen, scene->show_topic_column, topic_width), p->payload + p->payloadpos) > len - 4) strcpy(&buffer[len - 4], "...");
+                if (snprintf(buffer, cols, "[%s] %-*s %-*s %s", p->timestamp + (scene->show_ts?0:11), match_width, p->sub, topic_width - scene->show_topic_column, p->topic + max_move_p(p->topic, p->topiclen, scene->show_topic_column, topic_width), p->payload + p->payloadpos) > cols - 4) strcpy(&buffer[cols - 4], "...");
             } else {
-                if (snprintf(buffer, len, "[%s] %-*s %s", p->timestamp + (scene->show_ts?0:11), topic_width - scene->show_topic_column, p->topic + max_move_p(p->topic, p->topiclen, scene->show_topic_column, topic_width), p->payload + p->payloadpos) > len - 4) strcpy(&buffer[len - 4], "...");
+                if (snprintf(buffer, cols, "[%s] %-*s %s", p->timestamp + (scene->show_ts?0:11), topic_width - scene->show_topic_column, p->topic + max_move_p(p->topic, p->topiclen, scene->show_topic_column, topic_width), p->payload + p->payloadpos) > cols - 4) strcpy(&buffer[cols - 4], "...");
             }
             if (scene->heat) {
                 if (p->changed) {
@@ -399,12 +407,12 @@ void mqtt_data_print_table(WINDOW *win, mqtt_data *root, mqtt_data *d, scene_set
                 }
             } else {
                 if (p->changed) {
-                    if (strlen(scene->search) && regex_match(p->topic, scene->search)) wattron(win, COLOR_PAIR(2) | hlight);
+                    if (scene->search_active && regex_match(scene->search_re, p->topic)) wattron(win, COLOR_PAIR(2) | hlight);
                     else wattron(win, A_BOLD);
                 }
                 mvwprintw(win, i, 0, "%s", buffer);
                 if (p->changed) {
-                    if (strlen(scene->search) && regex_match(p->topic, scene->search)) wattroff(win, COLOR_PAIR(2) | hlight);
+                    if (scene->search_active && regex_match(scene->search_re, p->topic)) wattroff(win, COLOR_PAIR(2) | hlight);
                     else wattroff(win, A_BOLD);
                 }
             }
@@ -422,10 +430,6 @@ void mqtt_data_print_table(WINDOW *win, mqtt_data *root, mqtt_data *d, scene_set
             mvwprintw(win, i++, 0, "%s", "");
             wclrtoeol(win);
         }
-    }
-
-    if ((scene->search_visible > 0) && (--scene->search_visible == 0)) {
-        scene->search_mode = false;
     }
 
     free(buffer);
