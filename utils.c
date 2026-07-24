@@ -40,7 +40,9 @@ WINDOW *init_window() {
     noecho();             // Do not print input characters
     curs_set(FALSE);      // Hide the cursor
     cbreak();             // Disable line buffering
-    timeout(100);         // Non-blocking input with 100ms timeout
+    keypad(stdscr, TRUE);
+    set_escdelay(25);   
+    halfdelay(1);
 
     WINDOW *win = newwin(LINES, COLS, 0, 0); // Create a new window
     werase(win);

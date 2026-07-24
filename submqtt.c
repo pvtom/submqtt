@@ -17,9 +17,8 @@
 #include "hfunc.h"
 #include "help.h"
 
-#define RELEASE          "v1.1"
+#define RELEASE          "v1.2"
 #define OUTDATE_BUF      64
-#define REFRESH_SEC      0.1
 #define SEARCH_VISIBLE   300
 
 typedef struct _mqttattr {
@@ -92,18 +91,11 @@ static void catch_signal(int sig) {
     go = false;
 }
 
-static void *keyboard_handler(void *v) {
-    mqtt_data *p = NULL;
+void keyboard_handler() {
     int c;
     int pos;
-#if !defined(__MACH__)
-    pthread_setname_np(pthread_self(), "submqtt/keyboard");
-#endif
-    keypad(stdscr, TRUE);
-    set_escdelay(100);
-    noecho();
-    while (go) {
-      c = getch ();
+    c = getch ();
+    if (c != ERR) {
       if (scene.search_mode && (scene.search_visible > 0) && (c == 10)) {
           pthread_mutex_lock(&mutex);
           scene.search_mode = false;
@@ -124,7 +116,6 @@ static void *keyboard_handler(void *v) {
           scene.search_visible = SEARCH_VISIBLE;
           scene.search_occurence = 0;
       } else {
-          pthread_mutex_lock(&mutex);
           switch (c) {
           case KEY_F(7):  color = init_colors(win, COLOR_UP);
                           break;
@@ -163,7 +154,9 @@ static void *keyboard_handler(void *v) {
                           break;
           case 'x':       scene.heat = !scene.heat;
                           break;
-          case KEY_DOWN:  if (mqtta.pos + 1  < mqtt_data_count(mqttd, 0)) mqtta.pos++;
+          case KEY_DOWN:  pthread_mutex_lock(&mutex);
+                          if (mqtta.pos + 1  < mqtt_data_count(mqttd, 0)) mqtta.pos++;
+                          pthread_mutex_unlock(&mutex);
                           break;
           case KEY_UP:    if (mqtta.pos > 0) mqtta.pos--;
                           break;
@@ -177,28 +170,33 @@ static void *keyboard_handler(void *v) {
           case KEY_F(6):
           case KEY_SRIGHT: scene.show_payload_column--;
                           break;
-          case 'n':       scene.search_occurence++;
+          case 'n':       pthread_mutex_lock(&mutex);scene.search_occurence++;
                           pos = mqtt_data_search(mqttd, &scene);
                           if (pos > -1) {
                               mqtta.pos = pos;
                           } else {
                               scene.search_occurence = 0;
                           }
+                          pthread_mutex_unlock(&mutex);
                           break;
           case KEY_F(3):
           case KEY_PPAGE: mqtta.pos = mqtta.pos - LINES;
                           if (mqtta.pos < 0) mqtta.pos = 0;
                           break;
           case KEY_F(4):
-          case KEY_NPAGE: if (mqtta.pos + LINES < mqtt_data_count(mqttd, 0)) mqtta.pos = mqtta.pos + LINES;
+          case KEY_NPAGE: pthread_mutex_lock(&mutex);
+                          if (mqtta.pos + LINES < mqtt_data_count(mqttd, 0)) mqtta.pos = mqtta.pos + LINES;
+                          pthread_mutex_unlock(&mutex);
                           break;
           case KEY_F(1):
           case KEY_HOME:  mqtta.pos = 0;
                           scene.search_occurence = 0;
                           break;
           case KEY_F(2):
-          case KEY_END:   mqtta.pos = mqtt_data_count(mqttd, 0) - 1;
+          case KEY_END:   pthread_mutex_lock(&mutex);
+                          mqtta.pos = mqtt_data_count(mqttd, 0) - 1;
                           scene.search_occurence = 0;
+                          pthread_mutex_unlock(&mutex);
                           break;
           case '/':
           case ctrl('f'): if (scene.search_mode == false) {
@@ -226,10 +224,9 @@ static void *keyboard_handler(void *v) {
                           }
                           break;
           }
-          pthread_mutex_unlock(&mutex);
       }
     }
-    return(NULL);
+    return;
 }
 
 int add_topic(mqttattr *mqtta, char *topic) {
@@ -370,21 +367,17 @@ void message_callback(struct mosquitto *mosq, void *obj, const struct mosquitto_
         mosquitto_topic_matches_sub(mqtta->topics[i], message->topic, &match);
         if (match) break;
     }
-    pthread_mutex_lock(&mutex);
     if (mqtta->replace) {
         hstrcpy(&topic, &topic_size, "%s", message->topic);
         for (j = 0; j < mqtta->trlen; j++) hreplace_regex(&topic, &topic_size, &mqtta->topic_regex_re[j], mqtta->topic_replace[j]);
+        pthread_mutex_lock(&mutex);
         mqttd = mqtt_data_store(mqttd, mqtta->topics[i], topic, (char*)message->payload, message->payloadlen, mqtta->unsorted, mqtta->payload_cleanup);
+        pthread_mutex_unlock(&mutex);
     } else {
+        pthread_mutex_lock(&mutex);
         mqttd = mqtt_data_store(mqttd, mqtta->topics[i], message->topic, (char*)message->payload, message->payloadlen, mqtta->unsorted, mqtta->payload_cleanup);
+        pthread_mutex_unlock(&mutex);
     }
-    scene.nr = mqtt_data_count(mqttd, 0);
-    scene.from = mqtta->pos + 1;
-    scene.to = mqtta->pos + LINES;
-    if (scene.to > scene.nr) scene.to = scene.nr;
-    p = mqtt_data_position(mqttd, mqtta->pos);
-    mqtt_data_print_table(win, mqttd, p, &scene, underline, LINES, COLS);
-    pthread_mutex_unlock(&mutex);
     return;
 }
 
@@ -405,9 +398,6 @@ int main(int argc, char *argv[], char *envp[]) {
     int outd = 0;
     int i = 0;
     mqtt_data *p = NULL;
-    useconds_t usec = REFRESH_SEC * 1e6;
-
-    pthread_t thread_k;
 
     init_mqttattr(&mqtta);
 
@@ -656,16 +646,14 @@ int main(int argc, char *argv[], char *envp[]) {
         if (!rc) {
             win = init_window();
             color = init_colors(win, color);
-            pthread_create(&thread_k, NULL, &keyboard_handler, NULL);
             mosquitto_loop_start(mosq);
             while(go) {
-                usleep(usec);
                 if (mqttd == NULL) {
                     wattron(win, COLOR_PAIR(1) | A_BOLD);
                     mvwprintw(win, 0, 0, " %s%-*s", "Waiting for messages...", (int)(COLS - 1 - strlen("Waiting for messages...")), "");
-                    wclrtoeol(win);
                     wattroff(win, COLOR_PAIR(1) | A_BOLD);
                     wrefresh(win);
+                    keyboard_handler();
                     continue;
                 }
                 pthread_mutex_lock(&mutex);
@@ -674,20 +662,21 @@ int main(int argc, char *argv[], char *envp[]) {
                     scene.nr = mqtt_data_count(mqttd, 0);
                     if (mqtta.pos > scene.nr) mqtta.pos = scene.nr - 1;
                 }
-                if (mqtt_data_set_unchanged(mqttd, UPDATE_DURATION)) {
-                    scene.from = mqtta.pos + 1; 
-                    scene.to = mqtta.pos + LINES;
-                    if (scene.to > scene.nr) scene.to = scene.nr;
-                    p = mqtt_data_position(mqttd, mqtta.pos);
-                    mqtt_data_print_table(win, mqttd, p, &scene, underline, LINES, COLS);
-                    if ((scene.search_visible > 0) && (--scene.search_visible == 0)) {
-                        scene.search_mode = false;
-                    }
-                }   
+                mqtt_data_set_unchanged(mqttd, UPDATE_DURATION);
+                scene.nr = mqtt_data_count(mqttd, 0);
+                scene.from = mqtta.pos + 1; 
+                scene.to = mqtta.pos + LINES;
+                if (scene.to > scene.nr) scene.to = scene.nr;
+                p = mqtt_data_position(mqttd, mqtta.pos);
+                mqtt_data_print_table(win, mqttd, p, &scene, underline, LINES, COLS);
+                if ((scene.search_visible > 0) && (--scene.search_visible == 0)) {
+                    scene.search_mode = false;
+                }
                 if (outd > OUTDATE_BUF) { 
                     mqttd = mqtt_data_clean(mqttd);
                     outd = 0;
                 }
+                pthread_mutex_unlock(&mutex);
                 if (scene.search_mode) {
                     wattron(win, COLOR_PAIR(1) | A_BOLD);
                     mvwprintw(win, LINES-1, 0, " Topic >>> %s%-*s", scene.search, (int)(COLS - 1 - strlen(scene.search)), "");
@@ -772,10 +761,9 @@ int main(int argc, char *argv[], char *envp[]) {
                     mvwprintw(win, 2 + k, 0, "%s", " ");
                     wclrtoeol(win);
                 }
-                pthread_mutex_unlock(&mutex);
                 wrefresh(win);
+                keyboard_handler();
             }
-            pthread_join(thread_k, NULL);
         } else {
             printf("Error: Could not connect to '%s:%d'\n", mqtt_host, mqtt_port);
         }
@@ -786,6 +774,7 @@ int main(int argc, char *argv[], char *envp[]) {
     mosquitto_lib_cleanup();
     if (mqttd) mqtt_data_free(mqttd);
 
+    timeout(-1);
     endwin();
     destroy_mqttattr(&mqtta);
     regfree(scene.search_re);
