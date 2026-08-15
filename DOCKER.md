@@ -19,7 +19,8 @@
 | TZ | Local Time Zone | "Europe/Berlin" |
 | SUB | Show sub column  | true/false |
 | UNSORTED | unsorted data | true/false |
-| CLEANUP | replace non-printable characters in payload | true/false |
+| CLEANUP | replace non-printable characters in payload | 0 - 2 ** |
+| TRIGGER_ONLY_CHANGED_PAYLOADS | Trigger only modified payloads | true/false |
 | HEAT | highlight the newest updated topics | true/false |
 | HIGHLIGHT | topic to be highlighted (regex) | "power" |
 | OUTDATE | Number of seconds to drop old data sets | 86400 |
@@ -36,6 +37,7 @@
 | COLOR | Color Set | terminal-redm terminal-yellowm terminal-magentam terminal |
 
 *) multiple variables are allowed like TOPIC_01, TOPIC_02, ...
+**) 1 = replace space characters in payload, 2 = replace non-printable characters in payload
 
 ### Examples
 
@@ -45,4 +47,7 @@ docker run --rm -it -e TZ=Europe/Berlin -e MQTT_HOST=your_mqtt_broker -e COLOR=b
 
 # Example 2
 docker run --rm -it -e TZ=Europe/Berlin -e MQTT_HOST=your_mqtt_broker -e TOPIC_01=pv/+/power -e TOPIC_02=smarthome/# -e SUB=true -e HIGHLIGHT="power|temperature" -e COLOR=cyan pvtom/submqtt:latest
+
+# Example 3
+docker run --rm -it -e TZ=Europe/Berlin -e MQTT_HOST=your_mqtt_broker -e MQTT_PORT=1883 -e TLS=true -e TLS_CERT=client.crt -e TLS_KEY=client.key -e TLS_CA=ca.crt -v /path_to_certificates/tls:/tls pvtom/submqtt:latest
 ```

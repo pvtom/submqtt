@@ -29,7 +29,8 @@ help_text help[] = {
     { "F9", "Underline highlighted payloads" },
     { "'/', Crtl-f", "Search mode. Enter topics to be highlighted" },
     { "Crtl-d", "Clear search string" },
-    { "'n'", "Jump to the next highlighted topic" },
+    { "'n', 'N'", "Jump to the next / previous highlighted topic" },
+    { "'D'", "delete topics that remained unchanged for >60 sec" },
     { "", "" }
 };
 

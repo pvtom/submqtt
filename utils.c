@@ -1,4 +1,5 @@
 #include "utils.h"
+#include "hfunc.h"
 
 #define HEADER_TIMESTAMP "Timestamp"
 #define HEADER_SUB       "#"
@@ -25,6 +26,8 @@ cset_t colorset[] = {
 };
 
 int colorset_size = sizeof(colorset) / sizeof(colorset[0]);
+int total_count = 0;
+mqtt_data *cursor = NULL;
 
 WINDOW *init_window() {
     initscr();            // Initialize ncurses
@@ -71,7 +74,7 @@ time_t now(char *ts) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     timeinfo = localtime(&tv.tv_sec);
-    sprintf(ts, "%.4d-%.2d-%.2d %.2d:%.2d:%.2d", timeinfo->tm_year+1900, timeinfo->tm_mon+1, timeinfo->tm_mday, timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+    strftime(ts, 24, "%Y-%m-%d %H:%M:%S", timeinfo);
     return(tv.tv_sec); 
 }
 
@@ -85,19 +88,29 @@ int regex_match(regex_t *preg, char *string) {
     }
 }
 
-bool payload_cleanup(char *payload, int len) {
-    bool r = false;
+void payload_cleanup(char *payload, int len) {
     int c;
     for (c = 0; c < len; c++) {
         if (!isprint(payload[c])) {
             payload[c] = '?';
-            r = true;
         }
+    }
+    return;
+}
+
+mqtt_data *mqtt_data_find(mqtt_data *r, mqtt_data *cur, char *topic) {
+    mqtt_data *p = cur;
+
+    if (!cur) return(r);
+
+    while (p != NULL) {
+        if (strcmp(topic, p->topic) >= 0) return(p);
+        p = p->prev;
     }
     return(r);
 }
 
-mqtt_data *mqtt_data_create(char *sub, char *topic, char *payload, int payloadlen, char *timestamp, time_t t, mqtt_data *next, bool cleanup) {
+mqtt_data *mqtt_data_create(char *sub, char *topic, char *payload, int payloadlen, char *timestamp, time_t t, mqtt_data *prev, mqtt_data *next, int cleanup) {
     mqtt_data *p;
 
     if ((p = malloc(sizeof(mqtt_data))) == NULL) return(NULL);
@@ -107,27 +120,25 @@ mqtt_data *mqtt_data_create(char *sub, char *topic, char *payload, int payloadle
     p->topiclen = strlen(p->topic);
     p->payload = strndup(payload, payloadlen);
     p->payloadlen = payloadlen;
-    p->payload_dirty = cleanup || payload_cleanup(p->payload, p->payloadlen);
     p->payloadpos = 0;
     p->changed = true;
     p->outdated = false;
     strcpy(p->timestamp, timestamp);
     p->t = t;
+    p->prev = prev;
     p->next = next;
+    total_count++;
     return(p);
 }
 
-mqtt_data *mqtt_data_merge(mqtt_data *d, char *sub, char *topic, char *payload, int payloadlen, char *timestamp, time_t t, int unsorted, bool cleanup) {
+mqtt_data *mqtt_data_merge(mqtt_data *r, mqtt_data *d, char *sub, char *topic, char *payload, int payloadlen, char *timestamp, time_t t, int unsorted, int cleanup, bool trigger_only_payload_update) {
     mqtt_data *p = d;
     mqtt_data *n = NULL;
-    bool newlen;
 
     while (p != NULL) {
         if (!strcmp(p->topic, topic)) {
-            newlen = (p->payloadlen != payloadlen);
-            if (p->payload_dirty) payload_cleanup(payload, payloadlen);
-            if (newlen || strncmp(p->payload, payload, payloadlen)) {
-                if (newlen) {
+            if (!trigger_only_payload_update || (p->payloadlen != payloadlen) || strncmp(p->payload, payload, payloadlen)) {
+                if (p->payloadlen != payloadlen) {
                     p->payload = realloc(p->payload, payloadlen + 1);
                     p->payloadlen = payloadlen;
                     bzero(p->payload, payloadlen + 1);
@@ -135,36 +146,53 @@ mqtt_data *mqtt_data_merge(mqtt_data *d, char *sub, char *topic, char *payload, 
                 strncpy(p->payload, payload, payloadlen);
                 if (payloadlen < p->payloadpos) p->payloadpos = payloadlen;
                 p->changed = true;
+                if (p->outdated == true) total_count++;
                 p->outdated = false;
                 strcpy(p->timestamp, timestamp);
                 p->t = t;
             }
-            return(d);
+            cursor = p;
+            return(r);
         }
         if (!unsorted) {
             if (!n && (strcmp(p->topic, topic) > 0)) {
-               n = mqtt_data_create(sub, topic, payload, payloadlen, timestamp, t, p, cleanup);
+               cursor = n = mqtt_data_create(sub, topic, payload, payloadlen, timestamp, t, NULL, p, cleanup);
+               p->prev = n;
                return(n);
             }
             if (n && (strcmp(p->topic, topic) > 0)) {
-               n->next = mqtt_data_create(sub, topic, payload, payloadlen, timestamp, t, p, cleanup);
-               return(d);
+               cursor = n->next = mqtt_data_create(sub, topic, payload, payloadlen, timestamp, t, n, p, cleanup);
+               p->prev = n->next;
+               return(r);
             }
         }
         n = p;
         p = p->next;
     }
-    n->next = mqtt_data_create(sub, topic, payload, payloadlen, timestamp, t, NULL, cleanup);
-    return(d);
+    cursor = n->next = mqtt_data_create(sub, topic, payload, payloadlen, timestamp, t, n, NULL, cleanup);
+    return(r);
 }
 
-mqtt_data *mqtt_data_store(mqtt_data *d, char *sub, char *topic, char *payload, int payloadlen, bool unsorted, bool cleanup) {
+mqtt_data *mqtt_data_store(mqtt_data *d, char *sub, char *topic, char *payload, int payloadlen, bool unsorted, int cleanup, bool trigger_every_update) {
+    mqtt_data *r = d;
     mqtt_data *n = d;
     char timestamp[24];
     time_t t = now(timestamp);
-    payload_cleanup(payload, payloadlen);
-    if (!d) n = mqtt_data_create(sub, topic, payload, payloadlen, timestamp, t, NULL, cleanup);
-    else n = mqtt_data_merge(d, sub, topic, payload, payloadlen, timestamp, t, unsorted, cleanup);
+
+    if ((!payloadlen) || (payloadlen != strlen(payload))) return(n);
+
+    if (cleanup == 1) { 
+        payloadlen = trim_my_string(payload);
+    } else if (cleanup == 2) {
+        payloadlen = trim_my_string(payload);
+        payload_cleanup(payload, payloadlen);
+    }
+
+    if (!r) cursor = n = mqtt_data_create(sub, topic, payload, payloadlen, timestamp, t, NULL, NULL, cleanup);
+    else {
+        if (!unsorted) n = mqtt_data_find(r, cursor, topic);
+        n = mqtt_data_merge(r, n, sub, topic, payload, payloadlen, timestamp, t, unsorted, cleanup, trigger_every_update);
+    }
     return(n);
 }
 
@@ -185,19 +213,24 @@ mqtt_data *mqtt_data_clean(mqtt_data *d) {
     mqtt_data *p = d;
     mqtt_data *v = d;
     mqtt_data *n = d;
-    mqtt_data *t;
+    mqtt_data *next;
+    mqtt_data *prev;
     int s = 0;
 
     while (p != NULL) {
+        prev = p->prev;
         if (p->outdated) {
-            t = mqtt_data_clean_entry(p);
+            next = mqtt_data_clean_entry(p);
+            if (next) next->prev = prev;
+            if (prev && (cursor == p)) cursor = prev;
+            else if (next && (cursor == p)) cursor = next;
             if (!s) {
-                v = t;
-                n = t;
+                v = next;
+                n = next;
             } else {
-                v->next = t;
+                v->next = next;
             }
-            p = t;
+            p = next;
         } else {
             s = 1;
             v = p;
@@ -214,32 +247,6 @@ void mqtt_data_free(mqtt_data *d) {
         p = mqtt_data_clean_entry(p);
     }
     return;
-}
-
-int mqtt_data_count(mqtt_data *d, int all) {
-    mqtt_data *p = d;
-    int c = 0;
-
-    while (p != NULL) {
-        if (all || (p->outdated == false)) c++;
-        p = p->next;
-    }
-    return(c);
-}
-
-mqtt_data *mqtt_data_position(mqtt_data *d, int position) {
-    mqtt_data *p = d;
-    mqtt_data *pos = NULL;
-    int c = 0;
-
-    while ((p != NULL) && (position + 1 > c)) {
-        if (p->outdated == false) {
-            pos = p;
-            c++;
-        }
-        p = p->next;
-    }
-    return(pos);
 }
 
 int mqtt_data_set_unchanged(mqtt_data *d, int duration) {
@@ -273,7 +280,8 @@ int mqtt_data_set_outdated(mqtt_data *d, int duration) {
     time(&rawtime);
 
     while (p != NULL) {
-        if (rawtime - p->t >= duration) {
+        if ((p->outdated == false) && (rawtime - p->t >= duration)) {
+            total_count--;
             p->outdated = true;
             outdated++;
         }
@@ -282,32 +290,48 @@ int mqtt_data_set_outdated(mqtt_data *d, int duration) {
     return(outdated);
 }
 
-int mqtt_data_search(mqtt_data *d, scene_set *scene) {
-    mqtt_data *p;
-    int o, i, c, pos;
+mqtt_data *mqtt_data_search_up(mqtt_data *d, scene_set *scene) {
+    mqtt_data *p = d;
+    bool found = false;
     int s = strlen(scene->search);
 
-    for (i = 0; i < 2; i++) {
-        p = d;
-        o = scene->search_occurence;
-        c = 0;
-        pos = 0;
+    if (p) {
+        if (scene->search_occurence != 0) p = p->next;
         while (p != NULL) {
-            if (s && regex_match(scene->search_re, p->topic)  && (p->outdated == false)) {
-                o--;
-                if (!o) {
-                    pos = c;
-                    i = 2;
-                    break;
-                }
+            if (s && regex_match(scene->search_re, p->topic) && (p->outdated == false)) {
+                scene->search_occurence = 1;
+                found = true;
+                break;
             }
-            c++;
             p = p->next;
         }
-        if (!i) scene->search_occurence = 1;
     }
-    if (p == NULL) pos = -1;
-    return(pos);
+    if (found) return(p); 
+    else return(d);
+}
+
+mqtt_data *mqtt_data_search_down(mqtt_data *d, scene_set *scene) {
+    mqtt_data *p = d;
+    bool found = false; 
+    int s = strlen(scene->search);
+    
+    if (p) {
+        p = p->prev;
+        while (p != NULL) {
+            if (s && regex_match(scene->search_re, p->topic) && (p->outdated == false)) {
+                scene->search_occurence = 1;
+                found = true;
+                break;
+            }
+            p = p->prev;
+        }
+    }
+    if (found) return(p); 
+    else return(d);
+}
+
+int total_data_count() {
+    return(total_count);
 }
 
 int max_move_p(char *s, int len, int add, int width) {
@@ -338,6 +362,36 @@ void mqtt_data_payload_scroll(mqtt_data *d, int add, int size, bool reset) {
     return;
 }
 
+mqtt_data *mqtt_data_pos_plus(mqtt_data *d, int move) {
+    mqtt_data *p = d;
+    mqtt_data *o = d;
+    int i = move + 1; 
+
+    while ((p != NULL) && i) {
+        if (p->outdated == false) {
+            i--;
+            o = p;
+        }
+        p = p->next;
+    }
+    return(o);
+}
+
+mqtt_data *mqtt_data_pos_minus(mqtt_data *d, int move) {
+    mqtt_data *p = d;
+    mqtt_data *o = d;
+    int i = move + 1;
+
+    while ((p != NULL) && i) {
+        if (p->outdated == false) {
+            i--;
+            o = p;
+        } 
+        p = p->prev;
+    }
+    return(o);
+}
+
 void mqtt_data_print_table(WINDOW *win, mqtt_data *root, mqtt_data *d, scene_set *scene, bool underline, int lines, int cols) {
     mqtt_data *p = d;
     static int timestamp_width = strlen(HEADER_TIMESTAMP);
@@ -345,11 +399,11 @@ void mqtt_data_print_table(WINDOW *win, mqtt_data *root, mqtt_data *d, scene_set
     static int match_width = strlen(HEADER_SUB);
     int payload_width = strlen(HEADER_PAYLOAD) + 1;
     static int payload_size = 0;
-    int data_count = mqtt_data_count(d, 0);
+    int data_count = 0;
     char *buffer = malloc(sizeof(char) * cols + 32);
-    char pinfo[33];
+    char pinfo[17];
     int hlight = A_BOLD;
-    int bufferlen;
+    int pinfolen, bufferlen;
 
     time_t rawtime;
     time(&rawtime);
@@ -358,7 +412,8 @@ void mqtt_data_print_table(WINDOW *win, mqtt_data *root, mqtt_data *d, scene_set
     if (underline) hlight = A_BOLD | A_UNDERLINE;
 
     // Header
-    snprintf(pinfo, 32, "%d-%d(%d) ", scene->from, scene->to, scene->nr);
+    snprintf(pinfo, 16, "[%d] ", total_count);
+    pinfolen = strlen(pinfo);
     if (scene->search_mode) lines--;
     if (scene->sub) {
         snprintf(buffer, cols, "%-*s %-*s %-*s %-*s", scene->show_ts?timestamp_width + 1:0, HEADER_TIMESTAMP, match_width, HEADER_SUB, topic_width - scene->show_topic_column, HEADER_TOPIC, payload_width, HEADER_PAYLOAD);
@@ -369,8 +424,8 @@ void mqtt_data_print_table(WINDOW *win, mqtt_data *root, mqtt_data *d, scene_set
 
     wattron(win, COLOR_PAIR(1) | A_BOLD);
 
-    if (bufferlen + strlen(pinfo) < cols) {
-        mvwprintw(win, 0, 0, " %s%-*s%s", buffer, (int)(cols - 1 - bufferlen - strlen(pinfo)), "", pinfo);
+    if ((bufferlen + pinfolen) < cols) {
+        mvwprintw(win, 0, 0, " %s%-*s%s", buffer, (int)(cols - 1 - bufferlen - pinfolen), "", pinfo);
     } else {
         mvwprintw(win, 0, 0, " %s%-*s", buffer, (int)(cols - 1 - bufferlen), "");
     }
@@ -385,6 +440,7 @@ void mqtt_data_print_table(WINDOW *win, mqtt_data *root, mqtt_data *d, scene_set
     while ((p != NULL) && (i < lines - 1)) {
         if (p->outdated == false) {
             i++;
+            data_count++;
             if (timestamp_width < strlen(p->timestamp)) timestamp_width = strlen(p->timestamp);
             if (topic_width < p->topiclen) topic_width = p->topiclen;
             if (match_width < p->sublen) match_width = p->sublen;

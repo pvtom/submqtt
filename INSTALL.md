@@ -61,6 +61,8 @@ usage: submqtt
                 --sub add the matching subscribed topic to the output
                 --unsorted output of the buffered table
                 --cleanup replace non-printable characters in payload
+                --cleanup-spaces replace space characters in payload
+                --trigger_only_changed_payloads
 
         Color Sets:
                 --white --blue --cyan --red --green --magenta --yellow --blue-screen

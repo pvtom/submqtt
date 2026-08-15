@@ -81,3 +81,27 @@ size_t hreplace_regex(char **str, int *reserved, regex_t *preg, const char *repl
     }
     return(size);
 }
+
+size_t trim_my_string(char *str) {
+    size_t len = strlen(str);
+    size_t i = 0;
+    size_t j;
+
+    if (!len) return(0);
+
+    while ((i < len) && isspace(str[i])) i++;
+    if (i) {
+        memcpy(str, str + i, len - i);
+        str[len - i] = '\0';
+    }
+
+    i = len - i - 1;
+    while ((i > 0) && isspace(str[i])) {
+        str[i] = '\0';
+        i--;
+    }
+
+    for (j = 0; j < i + 1; j++) if (isspace(str[j])) str[j] = ' ';
+
+    return(i + 1);
+}

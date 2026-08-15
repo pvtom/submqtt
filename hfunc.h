@@ -3,5 +3,6 @@
 
 int hstrcpy(char **str, int *reserved, const char *fmt, ...);
 size_t hreplace_regex(char **str, int *reserved, regex_t *preg, const char *replace);
+size_t trim_my_string(char *str);
 
 #endif

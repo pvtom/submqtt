@@ -2,8 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#include <string.h>
 #include <unistd.h>
+#include <string.h>
 #include <ctype.h>
 #include <termios.h>
 #if !defined(__MACH__)
@@ -17,7 +17,7 @@
 #include "hfunc.h"
 #include "help.h"
 
-#define RELEASE          "v1.2"
+#define RELEASE          "v1.3"
 #define OUTDATE_BUF      64
 #define SEARCH_VISIBLE   300
 
@@ -42,7 +42,8 @@ typedef struct _mqttattr {
     char **topic_replace;
     bool replace;
     bool unsorted;
-    bool payload_cleanup;
+    int payload_cleanup;
+    bool trigger_only_payload_update;
     int pos;
 } mqttattr;
 
@@ -66,26 +67,27 @@ void init_mqttattr(mqttattr *m) {
     m->topic_replace = NULL;
     m->replace = false;
     m->unsorted = false;
-    m->payload_cleanup = false;
+    m->payload_cleanup = 0;
+    m->trigger_only_payload_update = false;
     m->pos = 0;
     return;
 }
 
 WINDOW *win = NULL;
-
-int color = 0;
-
-bool underline = false;
-
 struct mosquitto *mosq;
-mqtt_data *mqttd = NULL;
+mqtt_data *root = NULL;
+mqtt_data *mqttptr = NULL;
 mqttattr mqtta;
 scene_set scene;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 char *mqtt_tls_password = NULL;
+int color = 0;
 int outdate_duration = 0;
+int outd = 0;
 bool go = true;
 bool lock_q_key = false;
+bool control = false;
+bool underline = false;
 
 static void catch_signal(int sig) {
     go = false;
@@ -93,20 +95,14 @@ static void catch_signal(int sig) {
 
 void keyboard_handler() {
     int c;
-    int pos;
     c = getch ();
     if (c != ERR) {
       if (scene.search_mode && (scene.search_visible > 0) && (c == 10)) {
           pthread_mutex_lock(&mutex);
           scene.search_mode = false;
           scene.search_visible = 0;
-          scene.search_occurence++;
-          pos = mqtt_data_search(mqttd, &scene);
-          if (pos > -1) {
-              mqtta.pos = pos;
-          } else {
-              scene.search_occurence = 0;
-          }
+          scene.search_occurence = 0;
+          mqttptr = mqtt_data_search_up(root, &scene);
           pthread_mutex_unlock(&mutex);
       } else if (scene.search_mode && (scene.search_visible > 0) && isgraph(c) && (strlen(scene.search) < 78)) {
           scene.search[strlen(scene.search)] = c;
@@ -114,7 +110,6 @@ void keyboard_handler() {
           regcomp(scene.search_re, scene.search, REG_EXTENDED|REG_NEWLINE);
           if (strlen(scene.search)) scene.search_active = true; else scene.search_active = false;
           scene.search_visible = SEARCH_VISIBLE;
-          scene.search_occurence = 0;
       } else {
           switch (c) {
           case KEY_F(7):  color = init_colors(win, COLOR_UP);
@@ -129,7 +124,6 @@ void keyboard_handler() {
                               scene.search_mode = false;
                               scene.search_visible = 0;
                           }
-                          scene.search_occurence = 0;
           case ' ':       scene.help_text = false;
                           scene.info = false;
                           break;
@@ -154,11 +148,19 @@ void keyboard_handler() {
                           break;
           case 'x':       scene.heat = !scene.heat;
                           break;
-          case KEY_DOWN:  pthread_mutex_lock(&mutex);
-                          if (mqtta.pos + 1  < mqtt_data_count(mqttd, 0)) mqtta.pos++;
+          case 'D':       pthread_mutex_lock(&mutex);
+                          outd += mqtt_data_set_outdated(root, 60);
                           pthread_mutex_unlock(&mutex);
                           break;
-          case KEY_UP:    if (mqtta.pos > 0) mqtta.pos--;
+          case KEY_DOWN:  pthread_mutex_lock(&mutex);
+                          mqttptr = mqtt_data_pos_plus(mqttptr, 1);
+                          control = true;
+                          pthread_mutex_unlock(&mutex);
+                          break;
+          case KEY_UP:    pthread_mutex_lock(&mutex);
+                          mqttptr = mqtt_data_pos_minus(mqttptr, 1);
+                          control = true;
+                          pthread_mutex_unlock(&mutex);
                           break;
           case KEY_LEFT:  scene.show_topic_column++;
                           break;
@@ -170,32 +172,36 @@ void keyboard_handler() {
           case KEY_F(6):
           case KEY_SRIGHT: scene.show_payload_column--;
                           break;
-          case 'n':       pthread_mutex_lock(&mutex);scene.search_occurence++;
-                          pos = mqtt_data_search(mqttd, &scene);
-                          if (pos > -1) {
-                              mqtta.pos = pos;
-                          } else {
-                              scene.search_occurence = 0;
-                          }
+          case 'n':       pthread_mutex_lock(&mutex);
+                          mqttptr = mqtt_data_search_up(mqttptr, &scene);
+                          pthread_mutex_unlock(&mutex);
+                          break;
+          case 'N':       pthread_mutex_lock(&mutex);
+                          mqttptr = mqtt_data_search_down(mqttptr, &scene);
                           pthread_mutex_unlock(&mutex);
                           break;
           case KEY_F(3):
-          case KEY_PPAGE: mqtta.pos = mqtta.pos - LINES;
-                          if (mqtta.pos < 0) mqtta.pos = 0;
+          case KEY_PPAGE: pthread_mutex_lock(&mutex);
+                          mqttptr = mqtt_data_pos_minus(mqttptr, LINES - 1);
+                          control = true;
+                          pthread_mutex_unlock(&mutex);
                           break;
           case KEY_F(4):
           case KEY_NPAGE: pthread_mutex_lock(&mutex);
-                          if (mqtta.pos + LINES < mqtt_data_count(mqttd, 0)) mqtta.pos = mqtta.pos + LINES;
+                          mqttptr = mqtt_data_pos_plus(mqttptr, LINES - 1);
+                          control = true;
                           pthread_mutex_unlock(&mutex);
                           break;
           case KEY_F(1):
-          case KEY_HOME:  mqtta.pos = 0;
-                          scene.search_occurence = 0;
+          case KEY_HOME:  pthread_mutex_lock(&mutex);
+                          mqttptr = root;
+                          control = true;
+                          pthread_mutex_unlock(&mutex);
                           break;
           case KEY_F(2):
           case KEY_END:   pthread_mutex_lock(&mutex);
-                          mqtta.pos = mqtt_data_count(mqttd, 0) - 1;
-                          scene.search_occurence = 0;
+                          mqttptr = mqtt_data_pos_plus(mqttptr, total_data_count() - 1);
+                          control = true;
                           pthread_mutex_unlock(&mutex);
                           break;
           case '/':
@@ -206,12 +212,12 @@ void keyboard_handler() {
                               scene.search_mode = false;
                               scene.search_visible = 0;
                           }
+                          control = true;
                           break;
           case ctrl('d'): if (scene.search_mode) {
                               memset(scene.search, 0, sizeof(scene.search));
                               regcomp(scene.search_re, scene.search, REG_EXTENDED|REG_NEWLINE);
                               scene.search_active = false;
-                              scene.search_occurence = 0;
                           }
                           break;
           case KEY_BACKSPACE:
@@ -219,7 +225,6 @@ void keyboard_handler() {
                               scene.search[strlen(scene.search) - 1] = 0;
                               regcomp(scene.search_re, scene.search, REG_EXTENDED|REG_NEWLINE);
                               scene.search_visible = SEARCH_VISIBLE;
-                              scene.search_occurence = 0;
                               if (strlen(scene.search)) scene.search_active = true; else scene.search_active = false;
                           }
                           break;
@@ -245,17 +250,15 @@ int add_topic(mqttattr *mqtta, char *topic) {
     return(0);
 }
 
-// Github Copilot
 char **add_filter(char ***entry, int *len, char *filter) { 
     char **p = realloc(*entry, (*len + 1) * sizeof(char*));
-    if (!p) return *entry; // keep old pointer on failure
+    if (!p) return *entry;
     p[*len] = strdup(filter);
     *len = *len + 1;
     *entry = p;
     return *entry;
 }
 
-// Github Copilot
 void destroy_mqttattr(mqttattr *mqtta) {
     if (mqtta) {
         if (mqtta->topics) {
@@ -316,7 +319,7 @@ void connect_callback(struct mosquitto *mosq, void *obj, int result) {
         mosquitto_subscribe_multiple(mosq, NULL, mqtta->tlen, (char *const *const)mqtta->topics, mqtta->qos, 0, NULL);
     } else {
         pthread_mutex_lock(&mutex);
-        mqttd = mqtt_data_store(mqttd, "submqtt", "mqtt_broker/connect/error", (char *)mosquitto_connack_string(result), strlen(mosquitto_connack_string(result)), mqtta->unsorted, mqtta->payload_cleanup);
+        root = mqtt_data_store(root, "submqtt", "mqtt_broker/connect/error", (char *)mosquitto_connack_string(result), strlen(mosquitto_connack_string(result)), mqtta->unsorted, mqtta->payload_cleanup, mqtta->trigger_only_payload_update);
         pthread_mutex_unlock(&mutex);
     }
     return;
@@ -333,7 +336,6 @@ void message_callback(struct mosquitto *mosq, void *obj, const struct mosquitto_
     if (!mosq || !obj) return;
     bool match = false;
     mqttattr *mqtta = obj;
-    mqtt_data *p = NULL;
     static char *topic = NULL;
     static int topic_size = 0;
     int i, j;
@@ -371,11 +373,13 @@ void message_callback(struct mosquitto *mosq, void *obj, const struct mosquitto_
         hstrcpy(&topic, &topic_size, "%s", message->topic);
         for (j = 0; j < mqtta->trlen; j++) hreplace_regex(&topic, &topic_size, &mqtta->topic_regex_re[j], mqtta->topic_replace[j]);
         pthread_mutex_lock(&mutex);
-        mqttd = mqtt_data_store(mqttd, mqtta->topics[i], topic, (char*)message->payload, message->payloadlen, mqtta->unsorted, mqtta->payload_cleanup);
+        root = mqtt_data_store(root, mqtta->topics[i], topic, (char*)message->payload, message->payloadlen, mqtta->unsorted, mqtta->payload_cleanup, mqtta->trigger_only_payload_update);
+        if ((mqttptr == NULL) || !control) mqttptr = root;
         pthread_mutex_unlock(&mutex);
     } else {
         pthread_mutex_lock(&mutex);
-        mqttd = mqtt_data_store(mqttd, mqtta->topics[i], message->topic, (char*)message->payload, message->payloadlen, mqtta->unsorted, mqtta->payload_cleanup);
+        root = mqtt_data_store(root, mqtta->topics[i], message->topic, (char*)message->payload, message->payloadlen, mqtta->unsorted, mqtta->payload_cleanup, mqtta->trigger_only_payload_update);
+        if ((mqttptr == NULL) || !control) mqttptr = root;
         pthread_mutex_unlock(&mutex);
     }
     return;
@@ -395,9 +399,7 @@ int main(int argc, char *argv[], char *envp[]) {
     char cid[128];
     strcpy(cid, "");
     int rc = 0;
-    int outd = 0;
     int i = 0;
-    mqtt_data *p = NULL;
 
     init_mqttattr(&mqtta);
 
@@ -418,7 +420,7 @@ int main(int argc, char *argv[], char *envp[]) {
     while(i < argc) {
         if ((!strcmp(argv[i], "-h")) && (i+1 < argc)) mqtt_host = argv[++i];
         if ((!strcmp(argv[i], "-p")) && (i+1 < argc)) mqtt_port = atoi(argv[++i]);
-        if ((!strcmp(argv[i], "--client_id")) && (i+1 < argc)) strncpy(cid, argv[++i], 127);
+        if ((!strcmp(argv[i], "--client_id") || !strcmp(argv[i], "--client-id")) && (i+1 < argc)) strncpy(cid, argv[++i], 127);
         if ((!strcmp(argv[i], "--user")) && (i+1 < argc)) mqtt_user = argv[++i]; 
         if ((!strcmp(argv[i], "--password")) && (i+1 < argc)) mqtt_password = argv[++i];
         if (!strcmp(argv[i], "--tls")) tls = true;
@@ -426,9 +428,9 @@ int main(int argc, char *argv[], char *envp[]) {
         if ((!strcmp(argv[i], "--capath")) && (i+1 < argc)) tls_capath = argv[++i];
         if ((!strcmp(argv[i], "--certfile")) && (i+1 < argc)) tls_certfile = argv[++i];
         if ((!strcmp(argv[i], "--keyfile")) && (i+1 < argc)) tls_keyfile = argv[++i];
-        if ((!strcmp(argv[i], "--tls_password")) && (i+1 < argc)) mqtt_tls_password = argv[++i];
+        if ((!strcmp(argv[i], "--tls_password") || !strcmp(argv[i], "--tls-password")) && (i+1 < argc)) mqtt_tls_password = argv[++i];
         if ((!strcmp(argv[i], "-q")) && (i+1 < argc)) mqtta.qos = atoi(argv[++i]);
-        if (!strcmp(argv[i], "--lock_q")) lock_q_key = true;
+        if (!strcmp(argv[i], "--lock_q") || !strcmp(argv[i], "--lock-q")) lock_q_key = true;
         if ((!strcmp(argv[i], "-t") || !strcmp(argv[i], "--topic")) && (i+1 < argc)) add_topic(&mqtta, argv[++i]);
         if ((!strcmp(argv[i], "-f") || !strcmp(argv[i], "--filter")) && (i+1 < argc)) mqtta.filters = add_filter(&mqtta.filters, &mqtta.flen, argv[++i]);
         if ((!strcmp(argv[i], "-s") || !strcmp(argv[i], "--search")) && (i + 1 < argc)) mqtta.topic_regex = add_filter(&mqtta.topic_regex, &mqtta.trlen, argv[++i]);
@@ -440,7 +442,9 @@ int main(int argc, char *argv[], char *envp[]) {
         if (!strcmp(argv[i], "--outdate") && (i+1 < argc)) outdate_duration = atoi(argv[++i]);
         if (!strcmp(argv[i], "--sub")) scene.sub = true;
         if (!strcmp(argv[i], "--unsorted")) mqtta.unsorted = true;
-        if (!strcmp(argv[i], "--cleanup")) mqtta.payload_cleanup = true;
+        if (!strcmp(argv[i], "--cleanup-spaces")) mqtta.payload_cleanup = 1;
+        if (!strcmp(argv[i], "--cleanup")) mqtta.payload_cleanup = 2;
+        if (!strcmp(argv[i], "--trigger_only_changed_payloads") || !strcmp(argv[i], "--trigger-only-changed-payloads")) mqtta.trigger_only_payload_update = true;
         else if ((!strcmp(argv[i], "--color")) && (i+1 < argc)) color = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--white")) color = COLOR_SET_WHITE;
         else if (!strcmp(argv[i], "--blue")) color = COLOR_SET_BLUE;
@@ -490,6 +494,8 @@ int main(int argc, char *argv[], char *envp[]) {
             printf("\t\t--sub add the matching subscribed topic to the output\n");
             printf("\t\t--unsorted output of the buffered table\n");
             printf("\t\t--cleanup replace non-printable characters in payload\n");
+            printf("\t\t--cleanup-spaces replace space characters in payload\n");
+            printf("\t\t--trigger_only_changed_payloads\n");
             printf("\n\tColor Sets:\n");
             printf("\t\t--white --blue --cyan --red --green --magenta --yellow --blue-screen\n");
             printf("\t\t--terminal-white --terminal-blue --terminal-cyan --terminal-red\n");
@@ -520,7 +526,8 @@ int main(int argc, char *argv[], char *envp[]) {
     ENV_STRING_DUP("TLS_PASSWORD", mqtt_tls_password);
     ENV_BOOL("SUB", scene.sub);
     ENV_BOOL("UNSORTED", mqtta.unsorted);
-    ENV_BOOL("CLEANUP", mqtta.payload_cleanup);
+    ENV_INT_RANGE("CLEANUP", mqtta.payload_cleanup, 0, 2);
+    ENV_BOOL("TRIGGER_ONLY_CHANGED_PAYLOADS", mqtta.trigger_only_payload_update);
     ENV_BOOL("HEAT", scene.heat);
     ENV_STRING("HIGHLIGHT", scene.search);
     ENV_INT("OUTDATE", outdate_duration);
@@ -613,7 +620,7 @@ int main(int argc, char *argv[], char *envp[]) {
     for (int i = 0; i < mqtta.plen; i++) regcomp(&mqtta.payloads_re[i], mqtta.payloads[i], REG_EXTENDED|REG_NEWLINE);
     for (int i = 0; i < mqtta.trlen; i++) regcomp(&mqtta.topic_regex_re[i], mqtta.topic_regex[i], REG_EXTENDED|REG_NEWLINE);
 
-    scene.search_re = malloc(1 * sizeof(regex_t));
+    scene.search_re = malloc(sizeof(regex_t));
     regcomp(scene.search_re, scene.search, REG_EXTENDED|REG_NEWLINE);
     if (strlen(scene.search)) scene.search_active = true; else scene.search_active = false;
 
@@ -648,7 +655,7 @@ int main(int argc, char *argv[], char *envp[]) {
             color = init_colors(win, color);
             mosquitto_loop_start(mosq);
             while(go) {
-                if (mqttd == NULL) {
+                if (root == NULL) {
                     wattron(win, COLOR_PAIR(1) | A_BOLD);
                     mvwprintw(win, 0, 0, " %s%-*s", "Waiting for messages...", (int)(COLS - 1 - strlen("Waiting for messages...")), "");
                     wattroff(win, COLOR_PAIR(1) | A_BOLD);
@@ -658,22 +665,15 @@ int main(int argc, char *argv[], char *envp[]) {
                 }
                 pthread_mutex_lock(&mutex);
                 if (outdate_duration > 0) {
-                    outd += mqtt_data_set_outdated(mqttd, outdate_duration);
-                    scene.nr = mqtt_data_count(mqttd, 0);
-                    if (mqtta.pos > scene.nr) mqtta.pos = scene.nr - 1;
+                    outd += mqtt_data_set_outdated(root, outdate_duration);
                 }
-                mqtt_data_set_unchanged(mqttd, UPDATE_DURATION);
-                scene.nr = mqtt_data_count(mqttd, 0);
-                scene.from = mqtta.pos + 1; 
-                scene.to = mqtta.pos + LINES;
-                if (scene.to > scene.nr) scene.to = scene.nr;
-                p = mqtt_data_position(mqttd, mqtta.pos);
-                mqtt_data_print_table(win, mqttd, p, &scene, underline, LINES, COLS);
+                mqtt_data_set_unchanged(root, UPDATE_DURATION);
+                mqtt_data_print_table(win, root, mqttptr, &scene, underline, LINES, COLS);
                 if ((scene.search_visible > 0) && (--scene.search_visible == 0)) {
                     scene.search_mode = false;
                 }
                 if (outd > OUTDATE_BUF) { 
-                    mqttd = mqtt_data_clean(mqttd);
+                    mqttptr = root = mqtt_data_clean(root);
                     outd = 0;
                 }
                 pthread_mutex_unlock(&mutex);
@@ -703,13 +703,14 @@ int main(int argc, char *argv[], char *envp[]) {
                 if (scene.info) {
                     char buffer[HELP_KEYS + HELP_TEXT + 1];
                     int i, k = 0;
-                    bool l = true;
                     wattron(win, COLOR_PAIR(2) | A_BOLD);
                     mvwprintw(win, 1, 0, " %s", "Info");
                     wattroff(win, COLOR_PAIR(2) | A_BOLD);
                     wclrtoeol(win);
                     sprintf(buffer, "submqtt %s", RELEASE);
                     mvwprintw(win, 2 + k++, 0, " %-*s %s", HELP_KEYS, "Release", buffer);
+                    wclrtoeol(win);
+                    mvwprintw(win, 2 + k++, 0, " %-*s %s:%d", HELP_KEYS, "Mqtt: broker", mqtt_host, mqtt_port);
                     wclrtoeol(win);
                     mvwprintw(win, 2 + k++, 0, " %-*s %s", HELP_KEYS, "Mqtt: client_id", cid);
                     wclrtoeol(win);
@@ -756,6 +757,8 @@ int main(int argc, char *argv[], char *envp[]) {
                     wclrtoeol(win);
                     mvwprintw(win, 2 + k++, 0, " %-*s %s", HELP_KEYS, "Heat mode", scene.heat?"true":"false");
                     wclrtoeol(win);
+                    mvwprintw(win, 2 + k++, 0, " %-*s %s", HELP_KEYS, "Outdate modus", outdate_duration?"true":"false");
+                    wclrtoeol(win);
                     mvwprintw(win, 2 + k++, 0, " %-*s %s", HELP_KEYS, "Search text", scene.search);
                     wclrtoeol(win);
                     mvwprintw(win, 2 + k, 0, "%s", " ");
@@ -772,7 +775,8 @@ int main(int argc, char *argv[], char *envp[]) {
         mosquitto_destroy(mosq);
     }
     mosquitto_lib_cleanup();
-    if (mqttd) mqtt_data_free(mqttd);
+
+    if (root) mqtt_data_free(root);
 
     timeout(-1);
     endwin();

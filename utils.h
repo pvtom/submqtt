@@ -122,12 +122,12 @@ struct _mqtt_data {
         int topiclen;
         char *payload;
         int payloadlen;
-        bool payload_dirty;
         int payloadpos;
         char timestamp[24];
         time_t t;
         bool changed;
         bool outdated;
+        struct _mqtt_data *prev;
         struct _mqtt_data *next;
 };
 
@@ -144,9 +144,6 @@ struct _scene_set {
         regex_t *search_re;
         bool help_text;
         bool info;
-        int nr;
-        int from;
-        int to;
         bool show_ts;
         int show_topic_column;
         int show_payload_column;
@@ -159,19 +156,16 @@ time_t now(char *ts);
 WINDOW *init_window();
 int init_colors(WINDOW *win, int c);
 int regex_match(regex_t *preg, char *string);
-bool payload_cleanup(char *payload, int len);
-int read_escape_sequence(unsigned char *buf, int maxlen);
-mqtt_data *mqtt_data_create(char *sub, char *topic, char *payload, int payloadlen, char *timestamp, time_t t, mqtt_data *next, bool cleanup);
-mqtt_data *mqtt_data_merge(mqtt_data *d, char *sub, char *topic, char *payload, int payloadlen, char *timestamp, time_t t, int unsorted, bool cleanup);
-mqtt_data *mqtt_data_store(mqtt_data *d, char *sub, char *topic, char *payload, int payloadlen, bool unsorted, bool cleanup);
+mqtt_data *mqtt_data_store(mqtt_data *d, char *sub, char *topic, char *payload, int payloadlen, bool unsorted, int cleanup, bool trigger_every_update);
 void mqtt_data_free(mqtt_data *d);
-mqtt_data *mqtt_data_position(mqtt_data *d, int position);
-int mqtt_data_search(mqtt_data *d, scene_set *scene);
+mqtt_data *mqtt_data_pos_plus(mqtt_data *d, int move);
+mqtt_data *mqtt_data_pos_minus(mqtt_data *d, int move);
+mqtt_data *mqtt_data_search_up(mqtt_data *d, scene_set *scene);
+mqtt_data *mqtt_data_search_down(mqtt_data *d, scene_set *scene);
 void mqtt_data_print_table(WINDOW *win, mqtt_data *root, mqtt_data *d, scene_set *scene, bool underline, int lines, int cols);
 mqtt_data *mqtt_data_clean(mqtt_data *d);
 int mqtt_data_set_unchanged(mqtt_data *d, int duration);
 int mqtt_data_set_outdated(mqtt_data *d, int duration);
-int mqtt_data_count(mqtt_data *d, int all);
-int max_move_p(char *s, int len, int add, int width);
+int total_data_count();
 
 #endif
